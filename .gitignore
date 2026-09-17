@@ -1,3 +1,15 @@
+# Visual Studio Specifics
+.vs/
+*.vcxproj.user
+*.vcxproj.idb
+*.natvis
+
+# Build output
+[Xx]64/
+[Xx]86/
+[Dd]ebug/
+[Rr]elease/
+
 # Prerequisites
 *.d
 
