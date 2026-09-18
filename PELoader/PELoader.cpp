@@ -2,38 +2,48 @@
 #include <Windows.h>
 #include <string>
 
+void PrintExportedFunctionNames(HMODULE imageBaseAddress, PIMAGE_NT_HEADERS ntHeaders)
+{
+	PIMAGE_EXPORT_DIRECTORY imageExportDirectory = (PIMAGE_EXPORT_DIRECTORY)((BYTE*)imageBaseAddress + ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+	DWORD numberOfNames = imageExportDirectory->NumberOfNames;
+	DWORD* exportNameRVAs = (DWORD*)((BYTE*)imageBaseAddress + imageExportDirectory->AddressOfNames);
+	std::cout << "The functions of the DLL:" << "\n";
+	for (DWORD i = 0; i < numberOfNames; i++)
+	{
+		std::cout << ((char*)imageBaseAddress + exportNameRVAs[i]) << "\n";
+	}
+}
+void PrintPEArchitecture(PIMAGE_NT_HEADERS ntHeaders)
+{
+	if (ntHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+		std::cout << "the PE is 64-bit\n";
+	else if (ntHeaders->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+		std::cout << "the PE is 32-bit\n";
+}
 int main()
 {
-    std::string pe_file_name = "kernel32.dll";
-    HMODULE image_base_address = LoadLibraryA(pe_file_name.c_str());
+	const std::string peFileName = "kernel32.dll";
+	HMODULE imageBaseAddress = LoadLibraryA(peFileName.c_str());
 
-    //mission 1
-    if (!image_base_address)
-    {
-        std::cerr << "Failed to load module: " << pe_file_name << " :( \n";
-        return 1;
-    }
-    std::cout << "The PE base address: " << image_base_address << "\n";
-    PIMAGE_DOS_HEADER pointer_dos_header = (PIMAGE_DOS_HEADER)image_base_address;
-    std::cout << "The PE magic: 0x" << std::hex << std::uppercase << pointer_dos_header->e_magic << "\n";
 
-    //mission 2
-    PIMAGE_NT_HEADERS pointer_nt_headers = (PIMAGE_NT_HEADERS)((BYTE*)pointer_dos_header + pointer_dos_header->e_lfanew);
-    if (pointer_nt_headers->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
-        std::cout << "the base of the PE is 64\n";
-    else if (pointer_nt_headers->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
-        std::cout << "the base of the PE is 32\n";
+	if (!imageBaseAddress)
+	{
+		std::cerr << "Failed to load module: " << peFileName << " :( \n";
+		return 1;
+	}
 
-    //mission 3
-    PIMAGE_EXPORT_DIRECTORY pointer_image_export_directory = (PIMAGE_EXPORT_DIRECTORY)((BYTE*)image_base_address + pointer_nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
-    DWORD number_of_Names = pointer_image_export_directory->NumberOfNames;
-    DWORD* rvas_of_names = (DWORD*)((BYTE*)image_base_address + pointer_image_export_directory->AddressOfNames);
-    std::cout << "The functions of the DLL:" << "\n";
-    for (DWORD i = 0; i < number_of_Names; i++)
-    {
-        std::cout << ((char*)image_base_address + rvas_of_names[i]) << "\n";
-    }
-    FreeLibrary(image_base_address);
-    return 0;
+	//mission 1
+	std::cout << "The PE base address: " << imageBaseAddress << "\n";
+	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)imageBaseAddress;
+	std::cout << "The PE magic: 0x" << std::hex << std::uppercase << dosHeader->e_magic << "\n";
+
+	//mission 2
+	PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((BYTE*)dosHeader + dosHeader->e_lfanew);
+	PrintPEArchitecture(ntHeaders);
+
+	//mission 3
+	PrintExportedFunctionNames(imageBaseAddress, ntHeaders);
+	FreeLibrary(imageBaseAddress);
+	return 0;
 
 }
