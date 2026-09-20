@@ -2,11 +2,11 @@
 #include <Windows.h>
 #include <string>
 
-void PrintExportedFunctionNames(HMODULE imageBaseAddress, PIMAGE_NT_HEADERS ntHeaders)
+void PrintExportedFunctionNames(HMODULE imageBaseAddress, PIMAGE_NT_HEADERS ntHeader)
 {
-	PIMAGE_EXPORT_DIRECTORY imageExportDirectory = (PIMAGE_EXPORT_DIRECTORY)((BYTE*)imageBaseAddress + ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
-	DWORD numberOfNames = imageExportDirectory->NumberOfNames;
-	DWORD* exportNameRVAs = (DWORD*)((BYTE*)imageBaseAddress + imageExportDirectory->AddressOfNames);
+		PIMAGE_EXPORT_DIRECTORY imageExportDirectory = (PIMAGE_EXPORT_DIRECTORY)((BYTE*)imageBaseAddress + ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+		DWORD numberOfNames = imageExportDirectory->NumberOfNames;
+		DWORD* exportNameRVAs = (DWORD*)((BYTE*)imageBaseAddress + imageExportDirectory->AddressOfNames);
 	std::cout << "The functions of the DLL:" << "\n";
 	for (DWORD i = 0; i < numberOfNames; i++)
 	{
@@ -38,11 +38,11 @@ int main()
 	std::cout << "The PE magic: 0x" << std::hex << std::uppercase << dosHeader->e_magic << "\n";
 
 	//mission 2
-	PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((BYTE*)dosHeader + dosHeader->e_lfanew);
-	PrintPEArchitecture(ntHeaders);
+	PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((BYTE*)dosHeader + dosHeader->e_lfanew);
+	PrintPEArchitecture(ntHeader);
 
 	//mission 3
-	PrintExportedFunctionNames(imageBaseAddress, ntHeaders);
+	PrintExportedFunctionNames(imageBaseAddress, ntHeader);
 	FreeLibrary(imageBaseAddress);
 	return 0;
 
