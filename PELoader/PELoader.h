@@ -6,7 +6,8 @@ enum PELoaderError {
     PELOADER_INVALID_NT,
     PELOADER_NULL_POINTER,
     PELOADER_MEMORY_ALLOCATION_FAILED,
-    PELOADER_ENTRY_POINT_CALL_FAILED
+    PELOADER_ENTRY_POINT_CALL_FAILED,
+	RELOCATION_FAILED
 };
 
 class PELoader {
@@ -16,10 +17,16 @@ public:
 		PIMAGE_NT_HEADERS ntHeader = ValidatePE(dllBuffer);
 		BYTE* pImageBase = (BYTE*)VirtualAlloc((VOID*)ntHeader->OptionalHeader.ImageBase, ntHeader->OptionalHeader.SizeOfImage, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 		if (!pImageBase) {
-			throw PELOADER_MEMORY_ALLOCATION_FAILED;
+			pImageBase = (BYTE*)VirtualAlloc(NULL, ntHeader->OptionalHeader.SizeOfImage, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+			if (!pImageBase)
+				throw PELOADER_MEMORY_ALLOCATION_FAILED;
 		}
 		memcpy(pImageBase, dllBuffer, ntHeader->OptionalHeader.SizeOfHeaders);
 		MapSections(ntHeader, dllBuffer, pImageBase);
+		if ((INT_PTR)pImageBase != ntHeader->OptionalHeader.ImageBase)
+		{
+			ActivateRelocations(pImageBase, ntHeader);
+		}
 		CallEntryPoint(pImageBase, ntHeader, DLL_PROCESS_ATTACH);
 		return pImageBase;
 	}
@@ -32,7 +39,9 @@ public:
 		CallEntryPoint(loadAddress, (PIMAGE_NT_HEADERS)(loadAddress + dosHeader->e_lfanew), DLL_PROCESS_DETACH);
 		VirtualFree(loadAddress, 0, MEM_RELEASE);
 	}
-	BYTE* getProcAddress(BYTE* moduleAddress, const char* funcName) {};
+	BYTE* getProcAddress(BYTE* moduleAddress, const char* funcName) {
+		return nullptr;
+	}
 private:
 	PIMAGE_NT_HEADERS ValidatePE(BYTE* dllBuffer) {
 		if (dllBuffer == nullptr) {
@@ -54,9 +63,6 @@ private:
 		for (WORD i = 0; i < ntHeader->FileHeader.NumberOfSections; i++)
 		{
 			PIMAGE_SECTION_HEADER currentSection = &sectionHeader[i];
-			if (currentSection->SizeOfRawData == 0) {
-				continue;
-			}
 			BYTE* destAddress = pImageBase + currentSection->VirtualAddress;
 			BYTE* srcAddress = dllBuffer + currentSection->PointerToRawData;
 			memcpy(destAddress, srcAddress, currentSection->SizeOfRawData);
@@ -77,5 +83,44 @@ private:
 			throw PELOADER_ENTRY_POINT_CALL_FAILED;
 		}
 	}
-	
+
+	void ActivateRelocations(BYTE* imageBase, PIMAGE_NT_HEADERS ntHeader) {
+		IMAGE_DATA_DIRECTORY  relocationDirectory = ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+		PIMAGE_BASE_RELOCATION baseRelocation = (PIMAGE_BASE_RELOCATION)(imageBase + relocationDirectory.VirtualAddress);
+		DWORD sizeCounter = 0;
+		INT_PTR delta = (INT_PTR)imageBase - ntHeader->OptionalHeader.ImageBase;
+		while (relocationDirectory.Size > sizeCounter) {
+			sizeCounter += baseRelocation->SizeOfBlock;
+			WORD* entries = (WORD*)((BYTE*)baseRelocation + sizeof(IMAGE_BASE_RELOCATION));
+			int entriesCount = (baseRelocation->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+			for (int i = 0; i < entriesCount; i++) {
+				WORD offset = entries[i] & 0xFFF;
+				WORD type = entries[i] >> 12;
+				BYTE* addressToRelocate = imageBase + baseRelocation->VirtualAddress + offset;
+				switch (type)
+				{
+				case IMAGE_REL_BASED_ABSOLUTE:
+					break;
+
+				case IMAGE_REL_BASED_HIGHLOW:
+					*(DWORD*)addressToRelocate += (DWORD)delta;
+					break;
+
+				case IMAGE_REL_BASED_DIR64:
+					*(ULONGLONG*)addressToRelocate += (ULONGLONG)delta;
+					break;
+
+				default:
+					throw RELOCATION_FAILED;
+				}
+			}
+			baseRelocation = (PIMAGE_BASE_RELOCATION)((BYTE*)baseRelocation + baseRelocation->SizeOfBlock);
+			if (sizeCounter > relocationDirectory.Size) {
+				throw RELOCATION_FAILED;
+			}
+		}
+
+	}
+
+
 };
