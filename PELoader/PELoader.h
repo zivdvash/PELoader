@@ -60,6 +60,9 @@ public:
 		DWORD nameIndex = binarySearch((BYTE*)moduleAddress, exports.names, exports.exportDirectory->NumberOfNames, funcName);
 		WORD functionIndex = exports.ordinals[nameIndex];
 		DWORD functionRva = exports.functions[functionIndex];
+		if (isForwarded((BYTE*)moduleAddress, functionRva)) {
+			return exportForwarding((BYTE*)moduleAddress, functionRva);
+		}
 		return (BYTE*)moduleAddress + functionRva;
 	}
 
@@ -210,6 +213,9 @@ private:
 		ExportTables exports = getExportTables((BYTE*)module);
 		DWORD functionIndex = ordinal - exports.exportDirectory->Base;
 		DWORD functionRva = exports.functions[functionIndex];
+		if (isForwarded((BYTE*)module, functionRva)) {
+			return exportForwarding((BYTE*)module, functionRva);
+		}
 		return (BYTE*)module + functionRva;
 	}
 
@@ -232,4 +238,35 @@ private:
 		}
 		throw PELOADER_NAME_NOT_FOUND;
 	}
+	BYTE* exportForwarding(BYTE* pImportedImageBase, DWORD functionRva) {
+		std::string forwarder = (const char*)((BYTE*)pImportedImageBase + functionRva);
+		size_t dot = forwarder.find('.');
+		std::string dllName = forwarder.substr(0, dot);
+		std::string functionName = forwarder.substr(dot + 1);
+		HMODULE forwardedModule = LoadLibraryA(dllName.c_str());
+		if (!forwardedModule)
+			throw PELOADER_IMPORT_LOAD_FAILED;
+		importedModules.push_back(forwardedModule);
+		BYTE* forwardedFunction;
+		if (!functionName.empty() && functionName[0] == '#'){
+			WORD ordinal = (WORD)std::stoi(functionName.substr(1));
+			forwardedFunction = resolveExportByOrdinal(forwardedModule, ordinal);
+		}
+		else{
+			forwardedFunction = getProcAddress((BYTE*)forwardedModule, functionName.c_str());
+		}
+		return forwardedFunction;
+	}
+
+	bool isForwarded(BYTE* module, DWORD functionRva){
+		PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)module;
+		PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((BYTE*)module + dosHeader->e_lfanew);
+		DWORD exportRva = ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+		DWORD exportSize = ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size;
+		if (functionRva >= exportRva && functionRva < exportRva + exportSize){
+			return true;
+		}
+		return false;
+	}
+
 };
