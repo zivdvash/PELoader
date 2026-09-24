@@ -13,12 +13,17 @@ enum PELoaderError {
 	PELOADER_RELOCATION_FAILED,
 	PELOADER_NAME_NOT_FOUND,
 	PELOADER_IMPORT_LOAD_FAILED,
+	PELOADER_PROC_ADDRESS_FORWARDED,
 };
 struct ExportTables { 
 	PIMAGE_EXPORT_DIRECTORY exportDirectory;
 	WORD* ordinals;
 	DWORD* names;
 	DWORD* functions;
+};
+struct ModulesToFree { 
+	BYTE* pImageBase;
+	std::vector<HMODULE> importedModules;
 };
 
 class PELoader {
@@ -43,6 +48,7 @@ class PELoader {
 				if (!pImageBase)
 					throw PELOADER_MEMORY_ALLOCATION_FAILED;
 			}
+			this->modulesToFree.push_back({ pImageBase, {} });
 			memcpy(pImageBase, dllBuffer, ntHeader->OptionalHeader.SizeOfHeaders);
 			mapSections(ntHeader, dllBuffer, pImageBase);
 			if ((INT_PTR)pImageBase != ntHeader->OptionalHeader.ImageBase){
@@ -67,35 +73,36 @@ class PELoader {
 			}
 			PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)loadAddress;
 			callEntryPoint(loadAddress, (PIMAGE_NT_HEADERS)(loadAddress + dosHeader->e_lfanew), DLL_PROCESS_DETACH);
-			for (HMODULE module : importedModules){
-				FreeLibrary(module);
+			for (HMODULE freeModule : findModulesToFreeVector(loadAddress)){
+				FreeLibrary(freeModule);
 			}
-			importedModules.clear();
+			modulesToFree.erase(modulesToFree.begin() + findModulesToFree(loadAddress));
 			VirtualFree(loadAddress, 0, MEM_RELEASE);
 		}
 		/*
 		* main purpose: find and return the address of requested function from the loaded PE file
 		*
 		* @param: moduleAddress: base address of the loaded PE file 
-		* @param: funcName: requsted function to find and return
+		* @param: funcName:name of requsted function to find and return
 		* 
 		* helper functions: getExportTables(class PELoader),binarySearch(class PELoader), isForwarded(class PELoader),exportForwarding(class PELoader)
 		*
 		* @return: pointer base address of the requested function 
+		* 
 		*/
 		BYTE* getProcAddress(BYTE* moduleAddress, const char* funcName){
 			ExportTables exports = getExportTables(moduleAddress);
-			DWORD nameIndex = binarySearch((BYTE*)moduleAddress, exports.names, exports.exportDirectory->NumberOfNames, funcName);
+			DWORD nameIndex = binarySearch(moduleAddress, exports.names, exports.exportDirectory->NumberOfNames, funcName);
 			WORD functionIndex = exports.ordinals[nameIndex];
 			DWORD functionRva = exports.functions[functionIndex];
 			if (isForwarded((BYTE*)moduleAddress, functionRva)) {
-				return exportForwarding((BYTE*)moduleAddress, functionRva);
+				return exportForwarding(moduleAddress, functionRva, moduleAddress);
 			}
-			return (BYTE*)moduleAddress + functionRva;
+			return moduleAddress + functionRva;
 		}
 
 	private:
-		std::vector<HMODULE> importedModules; // used for releasing the imported modules later
+		std::vector<ModulesToFree> modulesToFree; //main purpose: used for releasing the imported modules later
 
 		PIMAGE_NT_HEADERS validatePE(BYTE* dllBuffer){
 			if (dllBuffer == nullptr){
@@ -224,7 +231,7 @@ class PELoader {
 				HMODULE pImportedImageBase = LoadLibraryA((LPCSTR)(pImageBase + imageImportDirectory->Name));
 				if (!pImportedImageBase)
 					throw PELOADER_IMPORT_LOAD_FAILED;
-				importedModules.push_back(pImportedImageBase);
+				findModulesToFreeVector(pImageBase).push_back(pImportedImageBase);
 				DWORD originalThunkRva = imageImportDirectory->OriginalFirstThunk;
 				if (originalThunkRva == 0)
 					originalThunkRva = imageImportDirectory->FirstThunk;
@@ -235,11 +242,11 @@ class PELoader {
 					BYTE* functionAddress;
 					if (isImportByOrdinal(ntHeader, originalThunk)){
 						WORD ordinal = getImportOrdinal(ntHeader, originalThunk);
-						functionAddress = resolveExportByOrdinal((BYTE*)pImportedImageBase, ordinal);
+						functionAddress = resolveExportByOrdinal((BYTE*)pImportedImageBase, ordinal, pImageBase);
 					}
 					else{
 						PIMAGE_IMPORT_BY_NAME importByName = (PIMAGE_IMPORT_BY_NAME)(pImageBase + originalThunk->u1.AddressOfData);
-						functionAddress = getProcAddress((BYTE*)pImportedImageBase, (const char*)importByName->Name);
+						functionAddress = resolveExportByName((BYTE*)pImportedImageBase, (const char*)importByName->Name, pImageBase);
 					}
 					thunk->u1.Function = (ULONG_PTR)functionAddress;
 					originalThunk++;
@@ -279,21 +286,44 @@ class PELoader {
 		/*
 		* main purpose: handle the search of the requested imported function if its ordinal based 
 		*
-		* @param: moduleBase: base address of the imported PE file
+		* @param: moduleDest: base address of the imported PE file
 		* @param: ordinal: the ordinal of the function we are looking for
+		* @param: baseModule: base address of the base module
 		*
 		* helper functions: getExportTables(class PELoader), isForwarded(class PELoader), exportForwarding(class PEloader)
 		*
 		* @return: pointer to base address of the requested function
 		*/
-		BYTE* resolveExportByOrdinal(BYTE* moduleBase, WORD ordinal){
-			ExportTables exports = getExportTables(moduleBase);
+		BYTE* resolveExportByOrdinal(BYTE* moduleDest, WORD ordinal, BYTE* baseModule){
+			ExportTables exports = getExportTables(moduleDest);
 			DWORD functionIndex = ordinal - exports.exportDirectory->Base;
 			DWORD functionRva = exports.functions[functionIndex];
-			if (isForwarded(moduleBase, functionRva)) {
-				return exportForwarding(moduleBase, functionRva);
+			if (isForwarded(moduleDest, functionRva)) {
+				return exportForwarding(moduleDest, functionRva, baseModule);
 			}
-			return moduleBase + functionRva;
+			return moduleDest + functionRva;
+		}
+
+		/*
+		* main purpose: handle the search of the requested imported function if its name based 
+		*
+		* @param: moduleDest: base address of the loaded PE file
+		* @param: funcName: name of requsted function to find and return
+		* @param: baseModule: base address of the base module
+		*
+		* helper functions: getExportTables(class PELoader),binarySearch(class PELoader), isForwarded(class PELoader),exportForwarding(class PELoader)
+		*
+		* @return: pointer base address of the requested function
+		*/
+		BYTE* resolveExportByName(BYTE* moduleDest, const char* funcName, BYTE* baseModule) {
+			ExportTables exports = getExportTables(moduleDest);
+			DWORD nameIndex = binarySearch(moduleDest, exports.names, exports.exportDirectory->NumberOfNames, funcName);
+			WORD functionIndex = exports.ordinals[nameIndex];
+			DWORD functionRva = exports.functions[functionIndex];
+			if (isForwarded((BYTE*)moduleDest, functionRva)) {
+				return exportForwarding((BYTE*)moduleDest, functionRva, baseModule);
+			}
+			return moduleDest + functionRva;
 		}
 
 		DWORD binarySearch(BYTE* imageBase, DWORD* names, DWORD numberOfNames, const char* nameToFind){
@@ -320,12 +350,13 @@ class PELoader {
 		*
 		* @param: pImportedImageBase: base address of the imported PE file
 		* @param: functionRva: RVA to the forwarded string(can be ordinal or name - handled differently)
+		* @param: baseModule: base address of the base module
 		* 
 		* helper functions: LoadLibraryA(windows api),resolveExportByOrdinal(class PELoader), getProcAddress(class PEloader)
 		*
 		* @return: pointer of the requested function
 		*/
-		BYTE* exportForwarding(BYTE* pImportedImageBase, DWORD functionRva) {
+		BYTE* exportForwarding(BYTE* pImportedImageBase, DWORD functionRva,BYTE* baseModule) {
 			std::string forwarder = (const char*)((BYTE*)pImportedImageBase + functionRva);
 			size_t dot = forwarder.find('.');
 			std::string dllName = forwarder.substr(0, dot);
@@ -333,18 +364,29 @@ class PELoader {
 			HMODULE forwardedModule = LoadLibraryA(dllName.c_str());
 			if (!forwardedModule)
 				throw PELOADER_IMPORT_LOAD_FAILED;
-			importedModules.push_back(forwardedModule);
+			findModulesToFreeVector((BYTE*)baseModule).push_back(forwardedModule);
 			BYTE* forwardedFunction;
 			if (!functionName.empty() && functionName[0] == '#'){
 				WORD ordinal = (WORD)std::stoi(functionName.substr(1));
-				forwardedFunction = resolveExportByOrdinal((BYTE*)forwardedModule, ordinal);
+				forwardedFunction = resolveExportByOrdinal((BYTE*)forwardedModule, ordinal, baseModule);
 			}
 			else{
-				forwardedFunction = getProcAddress((BYTE*)forwardedModule, functionName.c_str());
+				forwardedFunction = resolveExportByName((BYTE*)forwardedModule, functionName.c_str(), baseModule);
 			}
 			return forwardedFunction;
 		}
-
+		/*
+		* main purpose: check if the function is forwarded (if the function is in the export directory it means that its exported because 
+		*				it doesnt point to a function like it should)
+		*
+		* @param: moduleBase: base address of the module  
+		* @param: functionRva: RVA to the forwarded string(can be ordinal or name - handled differently)
+		* @param: baseModule: base address of the base module
+		*
+		* helper functions:NONE
+		*
+		* @return: if the function is forwarded
+		*/
 		bool isForwarded(BYTE* moduleBase, DWORD functionRva){
 			PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)moduleBase;
 			PIMAGE_NT_HEADERS ntHeader = (PIMAGE_NT_HEADERS)((BYTE*)moduleBase + dosHeader->e_lfanew);
@@ -355,5 +397,23 @@ class PELoader {
 			}
 			return false;
 		}
+
+		std::vector<HMODULE>& findModulesToFreeVector(BYTE* pImageBase) {
+			for (ModulesToFree& freeModule : modulesToFree) {
+				if (freeModule.pImageBase == pImageBase)
+					return freeModule.importedModules;
+			}
+			throw PELOADER_NULL_POINTER;
+		}
+		int findModulesToFree(BYTE* pImageBase) {
+			int counter = 0;
+			for (ModulesToFree& freeModule : modulesToFree) {
+				if (freeModule.pImageBase == pImageBase)
+					return counter;
+				counter++;
+			}
+			throw PELOADER_NULL_POINTER;
+		}
+
 
 };
